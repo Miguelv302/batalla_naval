@@ -1,0 +1,225 @@
+using MySql.Data.MySqlClient;
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+
+class Server
+{
+    static int port = 8081;
+    static TcpListener server = new TcpListener(IPAddress.Any, port);
+    static Dictionary<string, char[,]> tableros = new Dictionary<string, char[,]>();
+    static Dictionary<string, int> posicionesPorCliente = new Dictionary<string, int>();
+    static Dictionary<string, string> posicionesGuardadas = new Dictionary<string, string>(); // Para guardar las posiciones
+    static Dictionary<string, string> ataquesGuardados = new Dictionary<string, string>();
+    static string[] equiposAsignados = { "B", "N" }; // Equipo Blanco y Negro
+    static List<TcpClient> clientes = new List<TcpClient>(); // Lista de clientes conectados
+    static int limitePosiciones = 5;
+    static string connectionString = "Server=localhost;Database=batalla_naval;Uid=root;Pwd=;"; // Cambia la contraseña
+
+    static void Main()
+    {
+        server.Start();
+        Console.WriteLine($"Servidor de batalla naval en el puerto {port}...");
+        while (clientes.Count < 2)
+        {
+            TcpClient client = server.AcceptTcpClient();
+            clientes.Add(client);
+            string equipo = equiposAsignados[clientes.Count - 1];
+            string clientID = equipo;
+            tableros[clientID] = InicializarTablero();
+            posicionesPorCliente[clientID] = 0;
+            posicionesGuardadas[clientID] = "";
+            Console.WriteLine($"Cliente conectado, asignado al equipo {equipo}");
+            EnviarMensaje(client, $"READY:{equipo}");
+            Thread clientThread = new Thread(() => ManejarCliente(client, clientID));
+            clientThread.Start();
+        }
+    }
+
+    static void ManejarCliente(TcpClient client, string clientID)
+    {
+        try
+        {
+            NetworkStream stream = client.GetStream();
+            byte[] buffer = new byte[1024];
+            while (true)
+            {
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                if (bytesRead == 0) break;
+                string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                string response = ProcesarComando(clientID, message);
+                MostrarTableros();
+                EnviarMensaje(client, response);
+
+                // Verificar si ambos jugadores terminaron de posicionar
+                if (posicionesPorCliente["B"] >= limitePosiciones && posicionesPorCliente["N"] >= limitePosiciones)
+                {
+                    GuardarPosicionesEnBD();
+
+                    // Enviar mensaje START a ambos clientes
+                    foreach (var c in clientes)
+                    {
+                        EnviarMensaje(c, "START");
+                    }
+
+                    Console.WriteLine("¡Fase de ataque iniciada!");
+                    FaseDeAtaque();
+                    return; // En lugar de break, salimos de la función
+                }
+            }
+            Console.WriteLine($"Cliente {clientID} desconectado.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error con el cliente {clientID}: {ex.Message}");
+        }
+    }
+
+    static char[,] InicializarTablero()
+    {
+        char[,] tablero = new char[8, 8];
+        for (int i = 0; i < 8; i++)
+            for (int j = 0; j < 8; j++)
+                tablero[i, j] = '-';
+        return tablero;
+    }
+
+    static string ProcesarComando(string clientID, string message)
+    {
+        string[] parts = message.Split(',');
+        if (parts.Length == 3 && parts[0] == "POSICIONAR")
+        {
+            if (posicionesPorCliente[clientID] >= limitePosiciones)
+                return $"Límite de {limitePosiciones} posiciones alcanzado.";
+
+            int fila = int.Parse(parts[1]);
+            int columna = int.Parse(parts[2]);
+            if (tableros[clientID][fila, columna] == '-')
+            {
+                tableros[clientID][fila, columna] = 'B';
+                posicionesPorCliente[clientID]++;
+                posicionesGuardadas[clientID] += $"{clientID}{fila}-{columna},";
+                return "Barco posicionado con éxito.";
+            }
+            return "Posición ocupada.";
+        }
+        return "Comando no válido.";
+    }
+
+    static void FaseDeAtaque()
+    {
+        Console.WriteLine("Iniciando fase de ataque...");
+        while (true)
+        {
+            foreach (var client in clientes)
+            {
+                string clientID = clientes.IndexOf(client) == 0 ? "B" : "N";
+                string enemigoID = clientID == "B" ? "N" : "B";
+                EnviarMensaje(client, "TURNO");
+
+                NetworkStream stream = client.GetStream();
+                byte[] buffer = new byte[1024];
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                string[] parts = message.Split(',');
+
+                if (parts.Length == 3 && parts[0] == "ATACAR")
+                {
+                    int fila = int.Parse(parts[1]);
+                    int columna = int.Parse(parts[2]);
+                    char resultado = tableros[enemigoID][fila, columna] == 'B' ? 'O' : 'X';
+                    ataquesGuardados[clientID] += $"{fila}-{columna}{resultado},";
+                    EnviarMensaje(client, resultado == 'O' ? "Impacto!" : "Fallaste!");
+                    tableros[enemigoID][fila, columna] = resultado;
+                    MostrarTableros();
+                    GuardarAtaquesEnBD();
+                }
+            }
+        }
+    }
+
+    static void MostrarTableros()
+    {
+        Console.Clear();
+        Console.WriteLine("Tableros de jugadores:");
+        foreach (var kvp in tableros)
+        {
+            Console.WriteLine($"Tablero de {kvp.Key}:");
+            char[,] tablero = kvp.Value;
+            Console.Write("   ");
+            for (int c = 0; c < 8; c++) Console.Write($" {c}  ");
+            Console.WriteLine("\n  +" + new string('-', 4 * 8 - 1) + "+");
+            for (int i = 0; i < 8; i++)
+            {
+                Console.Write($" {i} |");
+                for (int j = 0; j < 8; j++)
+                {
+                    if (tablero[i, j] == 'B') Console.BackgroundColor = ConsoleColor.White;
+                    else Console.BackgroundColor = ConsoleColor.Blue;
+                    Console.Write("   ");
+                    Console.ResetColor();
+                    Console.Write("|");
+                }
+                Console.WriteLine("\n  +" + new string('-', 4 * 8 - 1) + "+");
+            }
+            Console.WriteLine();
+        }
+    }
+
+    static void EnviarMensaje(TcpClient client, string message)
+    {
+        byte[] messageBytes = Encoding.UTF8.GetBytes(message);
+        NetworkStream stream = client.GetStream();
+        stream.Write(messageBytes, 0, messageBytes.Length);
+        stream.Flush();
+    }
+
+    static void GuardarPosicionesEnBD()
+    {
+        try
+        {
+            using (MySqlConnection conn = new MySqlConnection(connectionString))
+            {
+                conn.Open();
+                string posiciones = string.Join(" ", posicionesGuardadas.Values);
+                string query = "INSERT INTO Posiciones (posiciones) VALUES (@posiciones)";
+                using (MySqlCommand cmd = new MySqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@posiciones", posiciones);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            Console.WriteLine("Posiciones guardadas en la base de datos.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error al guardar en la base de datos: " + ex.Message);
+        }
+    }
+
+    static void GuardarAtaquesEnBD()
+    {
+        try
+        {
+            using (MySqlConnection conn = new MySqlConnection(connectionString))
+            {
+                conn.Open();
+                string ataques = string.Join(" ", ataquesGuardados.Values);
+                string query = "INSERT INTO Ataque (ataque) VALUES (@ataque)";
+                using (MySqlCommand cmd = new MySqlCommand(query, conn))
+                {
+                    cmd.Parameters.AddWithValue("@ataque", ataques);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            Console.WriteLine("Ataques guardados en la base de datos.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("Error al guardar en la base de datos: " + ex.Message);
+        }
+    }
+}
