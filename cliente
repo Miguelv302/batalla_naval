@@ -1,0 +1,216 @@
+using System;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+
+class Client
+{
+    static char[,] tableroPropio = new char[8, 8];
+    static char[,] tableroEnemigo = new char[8, 8];
+    static int barcosColocados = 0;
+    const int maxBarcos = 5;
+
+    static void Main()
+    {
+        string serverIp = "192.168.0.2";
+        int port = 8081;
+        InicializarTablero(tableroPropio);
+        InicializarTablero(tableroEnemigo);
+
+        try
+        {
+            using TcpClient client = new TcpClient(serverIp, port);
+            using NetworkStream stream = client.GetStream();
+            byte[] buffer = new byte[1024];
+
+            Console.WriteLine("Conectado al servidor. Esperando a otro jugador...");
+
+            while (true)
+            {
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                if (bytesRead == 0) continue;
+                string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                if (response.StartsWith("READY"))
+                {
+                    Console.WriteLine("Partida iniciada. Puedes comenzar a posicionar barcos.");
+                    break;
+                }
+            }
+
+            FasePosicionamiento(stream, buffer);
+
+            Console.WriteLine("Esperando a que inicie la fase de ataque...");
+
+            while (true)
+            {
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                if (bytesRead == 0) continue;
+                string response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                if (response.Contains("START"))
+                {
+                    Console.WriteLine("¡Fase de ataque iniciada!");
+                    Thread.Sleep(1000);
+                    FaseDeAtaque(stream, buffer);
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error: {ex.Message}");
+        }
+
+        Console.WriteLine("Conexión cerrada.");
+    }
+
+    static void FasePosicionamiento(NetworkStream stream, byte[] buffer)
+    {
+        while (barcosColocados < maxBarcos)
+        {
+            Console.Clear();
+            MostrarTablero(tableroPropio, "Tu tablero");
+
+            Console.Write($"Posiciona el barco #{barcosColocados + 1}\n");
+            Console.Write("Ingrese fila (0-7) o 'salir': ");
+            string filaInput = Console.ReadLine()?.Trim();
+            if (filaInput?.ToLower() == "salir") return;
+
+            Console.Write("Ingrese columna (0-7): ");
+            string columnaInput = Console.ReadLine()?.Trim();
+
+            if (ValidarCoordenadas(filaInput, columnaInput, out int fila, out int columna))
+            {
+                if (tableroPropio[fila, columna] == 'B')
+                {
+                    Console.WriteLine("Ya colocaste un barco ahí. Intenta otra posición.");
+                    Thread.Sleep(1500);
+                    continue;
+                }
+
+                string mensaje = $"POSICIONAR,{fila},{columna}";
+                byte[] data = Encoding.UTF8.GetBytes(mensaje);
+                stream.Write(data, 0, data.Length);
+
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                string respuesta = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                Console.WriteLine($"Servidor: {respuesta}");
+
+                if (respuesta.Contains("éxito"))
+                {
+                    tableroPropio[fila, columna] = 'B';
+                    barcosColocados++;
+                }
+                else
+                {
+                    Console.WriteLine("No se pudo colocar el barco. Intenta nuevamente.");
+                    Thread.Sleep(1500);
+                }
+            }
+            else
+            {
+                Console.WriteLine("Coordenadas inválidas.");
+                Thread.Sleep(1500);
+            }
+        }
+    }
+
+    static void FaseDeAtaque(NetworkStream stream, byte[] buffer)
+    {
+        while (true)
+        {
+            Console.Clear();
+            MostrarTablero(tableroEnemigo, "Tablero del enemigo (ataques)");
+            MostrarTablero(tableroPropio, "Tu tablero");
+
+            Console.Write("Ingrese fila para atacar (0-7) o 'salir': ");
+            string filaInput = Console.ReadLine()?.Trim();
+            if (filaInput?.ToLower() == "salir") break;
+
+            Console.Write("Ingrese columna para atacar (0-7): ");
+            string columnaInput = Console.ReadLine()?.Trim();
+
+            if (ValidarCoordenadas(filaInput, columnaInput, out int fila, out int columna))
+            {
+                if (tableroEnemigo[fila, columna] == 'O' || tableroEnemigo[fila, columna] == 'X')
+                {
+                    Console.WriteLine("Ya atacaste esa posición. Intenta otra.");
+                    Thread.Sleep(1500);
+                    continue;
+                }
+
+                string mensaje = $"ATACAR,{fila},{columna}";
+                byte[] data = Encoding.UTF8.GetBytes(mensaje);
+                stream.Write(data, 0, data.Length);
+
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                string respuesta = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                Console.WriteLine($"Servidor: {respuesta}");
+
+                if (respuesta.Contains("Impacto"))
+                {
+                    tableroEnemigo[fila, columna] = 'O';
+                }
+                else if (respuesta.Contains("Fallaste"))
+                {
+                    tableroEnemigo[fila, columna] = 'X';
+                }
+
+                Console.WriteLine("Presiona ENTER para continuar...");
+                Console.ReadLine();
+            }
+            else
+            {
+                Console.WriteLine("Coordenadas inválidas.");
+                Thread.Sleep(1500);
+            }
+        }
+    }
+
+    static bool ValidarCoordenadas(string filaInput, string columnaInput, out int fila, out int columna)
+    {
+        bool filaValida = int.TryParse(filaInput, out fila);
+        bool columnaValida = int.TryParse(columnaInput, out columna);
+
+        return filaValida && columnaValida &&
+               fila >= 0 && fila < 8 &&
+               columna >= 0 && columna < 8;
+    }
+
+    static void InicializarTablero(char[,] tablero)
+    {
+        for (int i = 0; i < 8; i++)
+            for (int j = 0; j < 8; j++)
+                tablero[i, j] = '-';
+    }
+
+    static void MostrarTablero(char[,] tablero, string titulo)
+    {
+        Console.WriteLine($"\n{titulo}:");
+        Console.Write("   ");
+        for (int c = 0; c < 8; c++) Console.Write($" {c}  ");
+        Console.WriteLine("\n  +" + new string('-', 4 * 8 - 1) + "+");
+
+        for (int i = 0; i < 8; i++)
+        {
+            Console.Write($" {i} |");
+            for (int j = 0; j < 8; j++)
+            {
+                char celda = tablero[i, j];
+                Console.BackgroundColor = celda switch
+                {
+                    'B' => ConsoleColor.White,
+                    'O' => ConsoleColor.Green,
+                    'X' => ConsoleColor.Red,
+                    _ => ConsoleColor.Blue
+                };
+                Console.Write("   ");
+                Console.ResetColor();
+                Console.Write("|");
+            }
+            Console.WriteLine("\n  +" + new string('-', 4 * 8 - 1) + "+");
+        }
+        Console.WriteLine();
+    }
+}
